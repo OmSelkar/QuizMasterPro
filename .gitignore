@@ -27,3 +27,4 @@ client/*.sw?
 
 
 server/serviceAccountKey.json
+.env
