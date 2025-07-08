@@ -66,7 +66,7 @@ export default function QuizLeaderboard() {
   }
 
   const handleUserClick = (userId) => {
-    if (userId && userId !== "unknown" && userId !== "anonymous") {
+    if (userId && userId !== "unknown" && userId !== "anonymous" && userId !== "private") {
       setSelectedUserId(userId)
       setProfileModalOpen(true)
     }
@@ -267,7 +267,7 @@ export default function QuizLeaderboard() {
                     <div
                       key={`${userId || "unknown"}-${index}`}
                       className={`flex items-center justify-between p-4 rounded-lg border transition-colors ${
-                        userId && userId !== "unknown" ? "cursor-pointer hover:bg-muted/70" : ""
+                        userId && userId !== "unknown" && userId !== "anonymous" && userId !== "private" ? "cursor-pointer hover:bg-muted/70" : ""
                       } ${
                         isCurrentUser
                           ? "bg-primary/5 border-primary/20"
@@ -275,7 +275,7 @@ export default function QuizLeaderboard() {
                             ? "bg-muted/50"
                             : "hover:bg-muted/50"
                       }`}
-                      onClick={() => userId && userId !== "unknown" && handleUserClick(userId)}
+                      onClick={() => userId && userId !== "unknown" && userId !== "anonymous" && userId !== "private" && handleUserClick(userId)}
                     >
                       <div className="flex items-center gap-4">
                         <div className="flex items-center gap-2">
@@ -296,7 +296,11 @@ export default function QuizLeaderboard() {
 
                         <div>
                           <p
-                            className={`font-medium ${userId && userId !== "unknown" ? "hover:text-primary transition-colors" : ""}`}
+                            className={`font-medium ${
+                              userId && userId !== "unknown" && userId !== "anonymous" && userId !== "private" 
+                                ? "hover:text-primary transition-colors" 
+                                : "text-muted-foreground"
+                            }`}
                           >
                             {userName}
                           </p>

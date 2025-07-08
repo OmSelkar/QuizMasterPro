@@ -5,6 +5,7 @@ import QuizAttempt from "../models/QuizAttempt.js"
 import admin from "firebase-admin"
 import mongoose from "mongoose"
 import User from "../models/User.js"
+import { privacyFilter, filterLeaderboardData } from "../middlewares/privacy-filter.js"
 
 /**
  * Helper: get current user id and display name
@@ -738,10 +739,12 @@ export const getQuizLeaderboard = async (req, res) => {
     console.log("Raw attempts found:", attempts.length)
     console.log("Sample attempt:", attempts[0])
 
-    // build leaderboard with Firebase lookup
+    // build leaderboard with Firebase lookup and privacy filtering
     const leaderboard = await Promise.all(
       attempts.map(async (a, idx) => {
         let displayName = "Anonymous"
+        let userPhotoURL = ""
+        let shouldShowUser = true
 
         // Try to get display name from various sources
         if (a.userName && typeof a.userName === "string" && a.userName.trim()) {
@@ -751,16 +754,48 @@ export const getQuizLeaderboard = async (req, res) => {
           try {
             const userRecord = await admin.auth().getUser(a.userId)
             displayName = userRecord.displayName || userRecord.email || "Anonymous"
+            userPhotoURL = userRecord.photoURL || ""
           } catch (firebaseError) {
             console.log(`Could not fetch Firebase user ${a.userId}:`, firebaseError.message)
             displayName = "Anonymous"
           }
         }
 
+        // Check user privacy settings from MongoDB
+        if (a.userId && a.userId !== "unknown") {
+          try {
+            const userProfile = await User.findOne({ firebaseUid: a.userId }).lean()
+            if (userProfile) {
+              // Apply privacy filtering
+              if (userProfile.privacy?.leaderboardVisibility === false) {
+                displayName = "Anonymous User"
+                userPhotoURL = ""
+                shouldShowUser = false
+              }
+              
+              // If profile is completely private, hide user info
+              if (userProfile.privacy?.profileVisibility === false) {
+                displayName = "Anonymous User"
+                userPhotoURL = ""
+              } else {
+                // Use stored profile data if available and privacy allows
+                if (userProfile.displayName && userProfile.privacy?.profileVisibility !== false) {
+                  displayName = userProfile.displayName
+                }
+                if (userProfile.photoURL && userProfile.privacy?.profileVisibility !== false) {
+                  userPhotoURL = userProfile.photoURL
+                }
+              }
+            }
+          } catch (dbError) {
+            console.log(`Could not fetch user profile ${a.userId}:`, dbError.message)
+          }
+        }
         const result = {
           rank: idx + 1,
-          userId: a.userId || "unknown",
+          userId: shouldShowUser ? (a.userId || "unknown") : "anonymous",
           user: displayName,
+          userPhotoURL: userPhotoURL || a.userPhotoURL || "",
           score: a.score || 0,
           timeTaken: a.timeTaken || 0,
           isCurrentUser: String(a.userId) === String(me.id),

@@ -291,8 +291,10 @@ export default function QuizDetail() {
                 {leaderboard.slice(0, 10).map((entry, idx) => (
                   <div
                     key={entry.userId || idx}
-                    className="flex items-center justify-between p-3 rounded-lg bg-muted/50 hover:bg-muted/70 transition-colors cursor-pointer"
-                    onClick={() => handleUserClick(entry.userId)}
+                    className={`flex items-center justify-between p-3 rounded-lg bg-muted/50 hover:bg-muted/70 transition-colors ${
+                      entry.userId && entry.userId !== "unknown" && entry.userId !== "anonymous" ? "cursor-pointer" : ""
+                    }`}
+                    onClick={() => entry.userId && entry.userId !== "unknown" && entry.userId !== "anonymous" && handleUserClick(entry.userId)}
                   >
                     <div className="flex items-center gap-3">
                       <div
@@ -313,7 +315,13 @@ export default function QuizDetail() {
                           <AvatarImage src={entry.userPhotoURL || "/placeholder.svg"} alt={entry.user} />
                           <AvatarFallback className="text-xs">{getUserInitials(entry.user)}</AvatarFallback>
                         </Avatar>
-                        <span className="font-medium hover:text-primary transition-colors">{entry.user}</span>
+                        <span className={`font-medium ${
+                          entry.userId && entry.userId !== "unknown" && entry.userId !== "anonymous" 
+                            ? "hover:text-primary transition-colors" 
+                            : "text-muted-foreground"
+                        }`}>
+                          {entry.user}
+                        </span>
                       </div>
                     </div>
                     <div className="text-right">
