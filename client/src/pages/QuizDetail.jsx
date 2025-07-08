@@ -290,11 +290,11 @@ export default function QuizDetail() {
               <div className="space-y-2">
                 {leaderboard.slice(0, 10).map((entry, idx) => (
                   <div
-                    key={entry.userId || idx}
+                    key={`${entry.userId || 'unknown'}-${idx}-${entry.score}-${entry.timeTaken}`}
                     className={`flex items-center justify-between p-3 rounded-lg bg-muted/50 hover:bg-muted/70 transition-colors ${
-                      entry.userId && entry.userId !== "unknown" && entry.userId !== "anonymous" ? "cursor-pointer" : ""
+                      entry.userId && entry.userId !== "unknown" && entry.userId !== "anonymous" && entry.userId !== "private" ? "cursor-pointer" : ""
                     }`}
-                    onClick={() => entry.userId && entry.userId !== "unknown" && entry.userId !== "anonymous" && handleUserClick(entry.userId)}
+                    onClick={() => entry.userId && entry.userId !== "unknown" && entry.userId !== "anonymous" && entry.userId !== "private" && handleUserClick(entry.userId)}
                   >
                     <div className="flex items-center gap-3">
                       <div
@@ -316,7 +316,7 @@ export default function QuizDetail() {
                           <AvatarFallback className="text-xs">{getUserInitials(entry.user)}</AvatarFallback>
                         </Avatar>
                         <span className={`font-medium ${
-                          entry.userId && entry.userId !== "unknown" && entry.userId !== "anonymous" 
+                          entry.userId && entry.userId !== "unknown" && entry.userId !== "anonymous" && entry.userId !== "private"
                             ? "hover:text-primary transition-colors" 
                             : "text-muted-foreground"
                         }`}>

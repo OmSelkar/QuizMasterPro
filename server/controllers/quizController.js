@@ -770,13 +770,14 @@ export const getQuizLeaderboard = async (req, res) => {
               if (userProfile.privacy?.leaderboardVisibility === false) {
                 displayName = "Anonymous User"
                 userPhotoURL = ""
-                shouldShowUser = false
+                shouldShowUser = false // This will set userId to "anonymous"
               }
               
               // If profile is completely private, hide user info
               if (userProfile.privacy?.profileVisibility === false) {
                 displayName = "Anonymous User"
                 userPhotoURL = ""
+                shouldShowUser = false // This will set userId to "anonymous"
               } else {
                 // Use stored profile data if available and privacy allows
                 if (userProfile.displayName && userProfile.privacy?.profileVisibility !== false) {
@@ -793,7 +794,7 @@ export const getQuizLeaderboard = async (req, res) => {
         }
         const result = {
           rank: idx + 1,
-          userId: shouldShowUser ? (a.userId || "unknown") : "anonymous",
+          userId: shouldShowUser ? (a.userId || "unknown") : "private",
           user: displayName,
           userPhotoURL: userPhotoURL || a.userPhotoURL || "",
           score: a.score || 0,

@@ -265,7 +265,7 @@ export default function QuizLeaderboard() {
 
                   return (
                     <div
-                      key={`${userId || "unknown"}-${index}`}
+                      key={`${userId || 'unknown'}-${index}-${score}-${timeTaken}-${createdAt}`}
                       className={`flex items-center justify-between p-4 rounded-lg border transition-colors ${
                         userId && userId !== "unknown" && userId !== "anonymous" && userId !== "private" ? "cursor-pointer hover:bg-muted/70" : ""
                       } ${
