@@ -2,21 +2,51 @@ import express from "express"
 import User from "../models/User.js"
 import QuizAttempt from "../models/QuizAttempt.js"
 import Quiz from "../models/Quiz.js"
-import { verifyFirebaseToken } from "../middlewares/verifyFirebaseToken.js"
+import { unifiedAuth } from "../middlewares/unifiedAuth.js"
 import { privacyFilter } from "../middlewares/privacy-filter.js"
 import admin from "firebase-admin"
 
 const router = express.Router()
 
 /**
- * Helper function to calculate comprehensive user statistics
+ * Helper: get current user id and display name from unified auth
  */
-async function calculateUserStatistics(userId) {
+function getCurrentUser(req) {
+  if (req.auth) {
+    const name = req.user?.displayName || req.user?.name || req.user?.email || "User"
+    return { id: req.auth.id, type: req.auth.type, name }
+  }
+  return null
+}
+
+/**
+ * Helper: Update user's last seen timestamp (unified)
+ */
+async function updateUserLastSeen(authId, authType) {
   try {
-    console.log(`📊 Calculating comprehensive stats for user: ${userId}`)
+    await User.findOneAndUpdate(
+      { authId, authType },
+      {
+        lastSeen: new Date(),
+        isOnline: true,
+      },
+      { upsert: false, new: true },
+    )
+    console.log(`✅ Updated last seen for user: ${authId} (${authType})`)
+  } catch (error) {
+    console.error("❌ Error updating user last seen:", error)
+  }
+}
+
+/**
+ * Helper function to calculate comprehensive user statistics (unified)
+ */
+async function calculateUserStatistics(authId) {
+  try {
+    console.log(`📊 Calculating comprehensive stats for user: ${authId}`)
 
     // Get all quiz attempts with populated quiz data
-    const attempts = await QuizAttempt.find({ userId })
+    const attempts = await QuizAttempt.find({ userId: authId })
       .populate({
         path: "quizId",
         select: "title questions creatorId",
@@ -29,7 +59,7 @@ async function calculateUserStatistics(userId) {
     const validAttempts = attempts.filter((attempt) => attempt.quizId != null)
 
     // Get created quizzes count
-    const quizzesCreated = await Quiz.countDocuments({ creatorId: userId })
+    const quizzesCreated = await Quiz.countDocuments({ creatorId: authId })
 
     if (validAttempts.length === 0) {
       return {
@@ -99,73 +129,134 @@ async function calculateUserStatistics(userId) {
 }
 
 /**
- * Helper function to find or create user safely
+ * Helper function to get user's online status
  */
-async function findOrCreateUserSafely(userId) {
+function getOnlineStatusDisplay(user) {
+  if (!user) return { text: "Unknown", color: "bg-gray-400" }
+
+  if (user.isOnline) {
+    return { text: "Online", color: "bg-green-500" }
+  } else if (user.lastSeen) {
+    const lastSeenDate = new Date(user.lastSeen)
+    const now = new Date()
+    const diffInMinutes = Math.floor((now - lastSeenDate) / (1000 * 60))
+
+    if (diffInMinutes < 5) {
+      return { text: "Just now", color: "bg-yellow-500" }
+    } else if (diffInMinutes < 60) {
+      return { text: `${diffInMinutes}m ago`, color: "bg-yellow-500" }
+    } else if (diffInMinutes < 1440) {
+      const hours = Math.floor(diffInMinutes / 60)
+      return { text: `${hours}h ago`, color: "bg-orange-500" }
+    } else {
+      const days = Math.floor(diffInMinutes / 1440)
+      return { text: `${days}d ago`, color: "bg-red-500" }
+    }
+  }
+
+  return { text: "Unknown", color: "bg-gray-400" }
+}
+
+/**
+ * Robust helper function to find or create user safely (unified)
+ */
+async function findOrCreateUserSafely(authId, authType) {
   try {
-    console.log(`🔍 Finding or creating user: ${userId}`)
+    console.log(`🔍 Finding or creating user: ${authId} (${authType})`)
 
     // First, try to find existing user
-    const user = await User.findOne({ firebaseUid: userId }).lean()
+    const user = await User.findOne({ authId, authType }).lean()
     if (user) {
-      console.log(`✅ Found existing user: ${userId}`)
+      console.log(`✅ Found existing user: ${authId}`)
       return user
     }
 
-    // If user doesn't exist, get from Firebase and create
-    let firebaseUser = null
-    try {
-      firebaseUser = await admin.auth().getUser(userId)
-      console.log(`🔥 Firebase user found: ${firebaseUser.email}`)
-    } catch (firebaseError) {
-      console.log(`❌ Firebase user not found: ${userId}`)
+    // For JWT users, we don't auto-create - they must register first
+    if (authType === "jwt") {
+      console.log(`❌ JWT user not found and won't be auto-created: ${authId}`)
       return null
     }
 
-    // Create new user
-    const newUser = await User.create({
-      firebaseUid: userId,
-      email: firebaseUser.email || null,
-      displayName: firebaseUser.displayName || firebaseUser.email?.split("@")[0] || "Quiz User",
-      photoURL: firebaseUser.photoURL || null,
-      provider: firebaseUser.providerData[0]?.providerId || "email",
-      bio: "Quiz enthusiast",
-      privacy: {
-        profileVisibility: true,
-        leaderboardVisibility: true,
-        showEmail: false,
-        showLocation: true,
-        showAge: true,
-        allowDirectMessages: true,
-        showOnlineStatus: true,
-        showQuizHistory: true,
-        allowProfileSearch: true,
-        showAchievements: true,
-      },
-      lastSeen: new Date(),
-      isOnline: true,
-    })
+    // For Firebase users, try to get from Firebase and create
+    let firebaseUser = null
+    try {
+      firebaseUser = await admin.auth().getUser(authId)
+      console.log(`🔥 Firebase user found: ${firebaseUser.email}`)
+    } catch (firebaseError) {
+      console.log(`❌ Firebase user not found: ${authId}`)
+      return null
+    }
 
-    console.log(`✅ Successfully created user: ${userId}`)
-    return newUser.toObject()
+    // Try to create new Firebase user with retry logic
+    let attempts = 0
+    const maxAttempts = 3
+
+    while (attempts < maxAttempts) {
+      try {
+        console.log(`🔄 Creating Firebase user attempt ${attempts + 1}/${maxAttempts}`)
+
+        const newUser = await User.create({
+          authId,
+          authType: "firebase",
+          email: firebaseUser.email || null,
+          displayName: firebaseUser.displayName || firebaseUser.email?.split("@")[0] || "Quiz User",
+          photoURL: firebaseUser.photoURL || null,
+          provider: firebaseUser.providerData[0]?.providerId || "firebase",
+          bio: "Quiz enthusiast",
+          privacy: {
+            profileVisibility: true,
+            leaderboardVisibility: true,
+            showEmail: false,
+            showLocation: true,
+            showStats: true,
+            showQuizHistory: true,
+            showSocialLinks: true,
+          },
+          lastSeen: new Date(),
+          isOnline: true,
+        })
+
+        console.log(`✅ Successfully created Firebase user: ${authId}`)
+        return newUser.toObject()
+      } catch (createError) {
+        attempts++
+
+        if (createError.code === 11000) {
+          // Duplicate key error - user was created by another request
+          console.log(`🔄 Duplicate key detected, fetching existing user...`)
+          const existingUser = await User.findOne({ authId, authType }).lean()
+          if (existingUser) {
+            console.log(`✅ Found user after race condition: ${authId}`)
+            return existingUser
+          }
+        }
+
+        if (attempts >= maxAttempts) {
+          console.error(`❌ Failed to create user after ${maxAttempts} attempts:`, createError)
+          throw createError
+        }
+
+        // Wait a bit before retrying
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      }
+    }
+
+    return null
   } catch (error) {
-    console.error(`❌ Error in findOrCreateUserSafely for ${userId}:`, error)
+    console.error(`❌ Error in findOrCreateUserSafely for ${authId} (${authType}):`, error)
     return null
   }
 }
 
-/**
- * GET /api/users/:userId/public-profile
- * Public profile route - NO authentication required
- */
+// Public profile route - NO authentication required
 router.get("/:userId/public-profile", async (req, res) => {
   try {
     const userId = req.params.userId
     console.log(`🌐 [PUBLIC] Fetching public profile for: ${userId}`)
 
-    // Use the safe user creation function
-    const user = await findOrCreateUserSafely(userId)
-
+    // Try to find user by authId (could be Firebase UID or JWT user ID)
+    let user = await User.findOne({ authId: userId }).lean()
+    
     if (!user) {
       console.log(`❌ [PUBLIC] User not found: ${userId}`)
       return res.status(404).json({
@@ -175,58 +266,66 @@ router.get("/:userId/public-profile", async (req, res) => {
     }
 
     // Check privacy settings
-    if (user.privacy && user.privacy.profileVisibility === false) {
+    if (!user.privacy?.profileVisibility || !user.privacy?.allowProfileViewing) {
       return res.status(403).json({
         success: false,
         message: "This profile is private",
       })
     }
 
-    // Get Firebase user data for additional info if available
-    let firebaseUser = null
-    try {
-      firebaseUser = await admin.auth().getUser(userId)
-    } catch (firebaseError) {
-      console.log("Firebase lookup failed, using MongoDB data only")
-    }
-
     // Calculate comprehensive statistics
     const stats = await calculateUserStatistics(userId)
 
+    // Get online status
+    const onlineStatus = getOnlineStatusDisplay(user)
+
     // Prepare profile data with proper privacy filtering
     const publicProfile = {
-      uid: user.firebaseUid,
-      name: user.displayName || firebaseUser?.displayName || user.email?.split("@")[0] || "Quiz User",
-      displayName: user.displayName || firebaseUser?.displayName || user.email?.split("@")[0] || "Quiz User",
-      email: user.privacy?.showEmail !== false ? user.email || firebaseUser?.email : null,
-      photoURL: user.photoURL || firebaseUser?.photoURL || "/placeholder.svg?height=100&width=100",
+      uid: user.authId,
+      authId: user.authId,
+      authType: user.authType,
+      name: user.displayName || "Quiz User",
+      displayName: user.displayName || "Quiz User",
+      email: user.privacy?.showEmail ? user.email : null,
+      photoURL: user.photoURL || "/placeholder.svg?height=100&width=100",
       bio: user.bio || "Quiz enthusiast",
-      location: user.privacy?.showLocation !== false ? user.location || "" : "",
-      website: user.privacy?.showSocialLinks !== false ? user.website || "" : "",
-      isOnline: user.privacy?.showOnlineStatus !== false ? user.isOnline || false : false,
-      lastSeen: user.privacy?.showOnlineStatus !== false ? user.lastSeen : null,
-      createdAt: firebaseUser?.metadata?.creationTime || user.createdAt,
+      location: user.privacy?.showLocation ? user.location || "" : "",
+      website: user.privacy?.showSocialLinks ? user.website || "" : "",
+      linkedin: user.privacy?.showSocialLinks ? user.linkedin || "" : "",
+      github: user.privacy?.showSocialLinks ? user.github || "" : "",
+      twitter: user.privacy?.showSocialLinks ? user.twitter || "" : "",
+      age: user.privacy?.showAge ? user.age : null,
+      skills: user.privacy?.showSocialLinks ? user.skills || [] : [],
+      interests: user.privacy?.showSocialLinks ? user.interests || [] : [],
+      occupation: user.occupation || "",
+      education: user.education || "",
+      isOnline: user.privacy?.showOnlineStatus ? user.isOnline || false : false,
+      lastSeen: user.privacy?.showOnlineStatus ? user.lastSeen : null,
+      createdAt: user.createdAt,
+      joinedDate: user.createdAt,
       provider: user.provider || "email",
+      onlineStatus: user.privacy?.showOnlineStatus ? onlineStatus : { text: "Hidden", color: "bg-gray-400" },
     }
 
     // Apply privacy settings to stats
-    const publicStats =
-      user.privacy?.showQuizHistory !== false
-        ? {
-            totalQuizzes: stats.totalQuizzesTaken,
-            totalQuizzesCreated: stats.totalQuizzesCreated,
-            perfectScores: stats.perfectScores,
-            totalTimeSpent: stats.totalTimeSpent,
-          }
-        : {
-            totalQuizzes: 0,
-            totalQuizzesCreated: 0,
-            perfectScores: 0,
-            totalTimeSpent: 0,
-          }
+    const publicStats = user.privacy?.showStats ? {
+      totalQuizzes: stats.totalQuizzesTaken,
+      totalQuizzesCreated: stats.totalQuizzesCreated,
+      quizzesCreated: stats.totalQuizzesCreated,
+      perfectScores: stats.perfectScores,
+      totalTimeSpent: stats.totalTimeSpent,
+      totalAttempts: stats.totalQuizzesTaken,
+    } : {
+      totalQuizzes: 0,
+      totalQuizzesCreated: 0,
+      quizzesCreated: 0,
+      perfectScores: 0,
+      totalTimeSpent: 0,
+      totalAttempts: 0,
+    }
 
     // Apply privacy settings to recent attempts
-    const publicRecentAttempts = user.privacy?.showQuizHistory !== false ? stats.recentAttempts.slice(0, 5) : []
+    const publicRecentAttempts = user.privacy?.showQuizHistory ? stats.recentAttempts.slice(0, 5) : []
 
     console.log(`✅ [PUBLIC] Public profile data prepared for: ${userId}`)
 
@@ -246,39 +345,24 @@ router.get("/:userId/public-profile", async (req, res) => {
   }
 })
 
-/**
- * GET /api/users/profile/performance
- * Performance endpoint with proper error handling
- */
-router.get("/profile/performance", verifyFirebaseToken, async (req, res) => {
+// Performance endpoint with unified auth
+router.get("/profile/performance", unifiedAuth, async (req, res) => {
   try {
-    const uid = req.uid
-    console.log("🔍 Fetching profile performance for user:", uid)
+    const { id: authId, type: authType } = req.auth
+    console.log("🔍 Fetching profile performance for user:", authId, authType)
 
-    if (!uid) {
+    if (!authId) {
       return res.status(401).json({
         success: false,
         message: "User not authenticated",
       })
     }
 
-    // Use the safe user creation function
-    const userProfile = await findOrCreateUserSafely(uid)
+    // Use the safe user finding function
+    const userProfile = await findOrCreateUserSafely(authId, authType)
 
     if (!userProfile) {
-      console.error(`❌ Failed to get or create user profile for: ${uid}`)
-      return res.status(404).json({
-        success: false,
-        message: "User not found",
-      })
-    }
-
-    // Get Firebase user data
-    let firebaseUser
-    try {
-      firebaseUser = await admin.auth().getUser(uid)
-    } catch (firebaseError) {
-      console.error("Firebase user lookup failed:", firebaseError)
+      console.error(`❌ Failed to get user profile for: ${authId} (${authType})`)
       return res.status(404).json({
         success: false,
         message: "User not found",
@@ -286,39 +370,58 @@ router.get("/profile/performance", verifyFirebaseToken, async (req, res) => {
     }
 
     // Update last seen for existing users
+    await updateUserLastSeen(authId, authType)
+
+    // Calculate comprehensive statistics
+    const stats = await calculateUserStatistics(authId)
+
+    // Update cached stats in database
     await User.findOneAndUpdate(
-      { firebaseUid: uid },
+      { authId, authType },
       {
-        lastSeen: new Date(),
-        isOnline: true,
+        $set: {
+          "stats.totalQuizzesTaken": stats.totalQuizzesTaken,
+          "stats.totalQuizzesCreated": stats.totalQuizzesCreated,
+          "stats.perfectScores": stats.perfectScores,
+          "stats.totalTimeSpent": stats.totalTimeSpent,
+          "stats.lastUpdated": new Date(),
+        },
       },
     )
 
-    // Calculate comprehensive statistics
-    const stats = await calculateUserStatistics(uid)
-
     // Prepare profile data in the format expected by UserProfileModal
     const profile = {
-      uid: firebaseUser.uid,
-      name: firebaseUser.displayName || userProfile.displayName || firebaseUser.email?.split("@")[0] || "Quiz User",
-      displayName:
-        userProfile.displayName || firebaseUser.displayName || firebaseUser.email?.split("@")[0] || "Quiz User",
-      email: firebaseUser.email,
-      photoURL: userProfile.photoURL || firebaseUser.photoURL || "/placeholder.svg?height=100&width=100",
+      uid: userProfile.authId,
+      authId: userProfile.authId,
+      authType: userProfile.authType,
+      name: userProfile.displayName || "Quiz User",
+      displayName: userProfile.displayName || "Quiz User",
+      email: userProfile.email,
+      photoURL: userProfile.photoURL || "/placeholder.svg?height=100&width=100",
       bio: userProfile.bio || "Quiz enthusiast and learner",
       location: userProfile.location || "",
       website: userProfile.website || "",
+      linkedin: userProfile.linkedin || "",
+      github: userProfile.github || "",
+      twitter: userProfile.twitter || "",
+      age: userProfile.age,
+      skills: userProfile.skills || [],
+      interests: userProfile.interests || [],
+      occupation: userProfile.occupation || "",
+      education: userProfile.education || "",
       isOnline: true,
       lastSeen: new Date().toISOString(),
-      createdAt: firebaseUser.metadata.creationTime,
-      joinedDate: firebaseUser.metadata.creationTime,
+      createdAt: userProfile.createdAt,
+      joinedDate: userProfile.createdAt,
       provider: userProfile.provider || "email",
       privacy: userProfile.privacy || {
         showEmail: true,
         showLocation: true,
+        showStats: true,
         showQuizHistory: true,
         showSocialLinks: true,
       },
+      settings: userProfile.settings,
     }
 
     const response = {
@@ -334,7 +437,12 @@ router.get("/profile/performance", verifyFirebaseToken, async (req, res) => {
       recentAttempts: stats.recentAttempts,
     }
 
-    console.log("✅ Sending profile performance response")
+    console.log("✅ Sending profile performance response:", {
+      profileExists: !!response.profile,
+      statsKeys: Object.keys(response.stats),
+      recentAttemptsCount: response.recentAttempts.length,
+    })
+
     res.json(response)
   } catch (error) {
     console.error("❌ Error getting user performance:", error)
@@ -346,41 +454,33 @@ router.get("/profile/performance", verifyFirebaseToken, async (req, res) => {
   }
 })
 
-/**
- * GET /api/users/profile
- * Get current user's profile
- */
-router.get("/profile", verifyFirebaseToken, async (req, res) => {
+// Get user profile (unified)
+router.get("/profile", unifiedAuth, async (req, res) => {
   try {
-    const userId = req.uid
+    const { id: authId, type: authType } = req.auth
 
-    if (!userId) {
+    if (!authId) {
       return res.status(401).json({
         success: false,
         message: "Not authenticated",
       })
     }
 
-    // Get user from Firebase and MongoDB
-    const firebaseUser = await admin.auth().getUser(userId)
-    const mongoUser = await User.findOne({ firebaseUid: userId }).lean()
+    const user = await User.findOne({ authId, authType }).select("-passwordHash")
 
-    // Combine data
-    const profile = {
-      uid: firebaseUser.uid,
-      email: firebaseUser.email,
-      displayName: firebaseUser.displayName || mongoUser?.displayName,
-      photoURL: firebaseUser.photoURL || mongoUser?.photoURL,
-      emailVerified: firebaseUser.emailVerified,
-      creationTime: firebaseUser.metadata.creationTime,
-      lastSignInTime: firebaseUser.metadata.lastSignInTime,
-      ...mongoUser,
-      id: userId,
+    if (!user) {
+      console.log("❌ User profile not found for authId:", authId, "authType:", authType)
+      return res.status(404).json({
+        success: false,
+        message: "User profile not found",
+      })
     }
 
-    return res.json({
+    console.log("✅ Profile found:", user._id)
+
+    res.json({
       success: true,
-      profile,
+      profile: user,
     })
   } catch (error) {
     console.error("Error fetching user profile:", error)
@@ -391,54 +491,102 @@ router.get("/profile", verifyFirebaseToken, async (req, res) => {
   }
 })
 
-/**
- * PUT /api/users/profile
- * Update user profile
- */
-router.put("/profile", verifyFirebaseToken, async (req, res) => {
+// Get user stats (unified)
+router.get("/stats", unifiedAuth, async (req, res) => {
   try {
-    const userId = req.uid
-    const {
-      displayName,
-      bio,
-      location,
-      website,
-      privacy,
-    } = req.body
+    const { id: authId, type: authType } = req.auth
+    console.log(`📊 [USER STATS] Getting stats for user: ${authId} (${authType})`)
 
-    if (!userId) {
+    if (!authId) {
+      return res.status(401).json({
+        success: false,
+        message: "User not authenticated",
+      })
+    }
+
+    // Get user data from MongoDB
+    let user = await User.findOne({ authId, authType }).lean()
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      })
+    }
+
+    // Calculate comprehensive statistics
+    const stats = await calculateUserStatistics(authId)
+
+    // Prepare response in the format expected by Profile.jsx
+    const response = {
+      success: true,
+      stats: {
+        totalQuizzesTaken: stats.totalQuizzesTaken,
+        bestScore: 0, // Will be calculated from recent attempts
+        averageScore: 0, // Will be calculated from recent attempts
+        quizzesCreated: stats.totalQuizzesCreated,
+      },
+    }
+
+    // Calculate best and average scores from recent attempts
+    if (stats.recentAttempts.length > 0) {
+      const scores = stats.recentAttempts.map((attempt) => {
+        const maxScore = Math.max(attempt.maxPossibleScore || 1, 1)
+        return Math.round((attempt.score / maxScore) * 100)
+      })
+
+      response.stats.bestScore = Math.max(...scores)
+      response.stats.averageScore = Math.round(scores.reduce((sum, score) => sum + score, 0) / scores.length)
+    }
+
+    console.log(`📊 [USER STATS] Returning stats:`, response.stats)
+    res.json(response)
+  } catch (error) {
+    console.error("❌ [USER STATS] Error getting user stats:", error)
+    res.status(500).json({
+      success: false,
+      message: "Failed to get user statistics",
+      error: error.message,
+    })
+  }
+})
+
+// Update user profile (unified)
+router.put("/profile", unifiedAuth, async (req, res) => {
+  try {
+    const { id: authId, type: authType } = req.auth
+    const updates = req.body
+
+    if (!authId) {
       return res.status(401).json({
         success: false,
         message: "Not authenticated",
       })
     }
 
-    // Update Firebase user if displayName changed
-    if (displayName) {
-      try {
-        await admin.auth().updateUser(userId, { displayName })
-      } catch (firebaseError) {
-        console.error("Error updating Firebase user:", firebaseError)
+    // Don't allow updating certain fields
+    delete updates.authId
+    delete updates.authType
+    delete updates.passwordHash
+    delete updates.createdAt
+    delete updates.updatedAt
+    delete updates._id
+    delete updates.__v
+
+    const updatedUser = await User.findOneAndUpdate(
+      { authId, authType }, 
+      { ...updates, lastSeen: new Date(), isOnline: true }, 
+      {
+        new: true,
+        runValidators: true,
       }
+    ).select("-passwordHash")
+
+    if (!updatedUser) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      })
     }
-
-    // Prepare MongoDB update data
-    const mongoUpdateData = {
-      lastSeen: new Date(),
-      isOnline: true,
-    }
-
-    if (displayName !== undefined) mongoUpdateData.displayName = displayName
-    if (bio !== undefined) mongoUpdateData.bio = bio
-    if (location !== undefined) mongoUpdateData.location = location
-    if (website !== undefined) mongoUpdateData.website = website
-    if (privacy !== undefined) mongoUpdateData.privacy = { ...mongoUpdateData.privacy, ...privacy }
-
-    const updatedUser = await User.findOneAndUpdate({ firebaseUid: userId }, mongoUpdateData, {
-      upsert: true,
-      new: true,
-      runValidators: true,
-    })
 
     return res.json({
       success: true,
@@ -455,30 +603,19 @@ router.put("/profile", verifyFirebaseToken, async (req, res) => {
   }
 })
 
-/**
- * POST /api/users/heartbeat
- * Update user's online status
- */
-router.post("/heartbeat", verifyFirebaseToken, async (req, res) => {
+// Update heartbeat (unified)
+router.post("/heartbeat", unifiedAuth, async (req, res) => {
   try {
-    const userId = req.uid
+    const { id: authId, type: authType } = req.auth
 
-    if (!userId) {
+    if (!authId) {
       return res.status(401).json({
         success: false,
         message: "Not authenticated",
       })
     }
 
-    await User.findOneAndUpdate(
-      { firebaseUid: userId },
-      {
-        firebaseUid: userId,
-        lastSeen: new Date(),
-        isOnline: true,
-      },
-      { upsert: true, new: true },
-    )
+    await updateUserLastSeen(authId, authType)
 
     return res.json({
       success: true,
